@@ -1,9 +1,18 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { FormEvent, useMemo, useState } from "react";
 import { createIncident } from "@/lib/firebase";
-import { IncidentMap } from "@/components/IncidentMap";
 import { ZoneList } from "@/components/ZoneList";
+
+const Map = dynamic(() => import("@/components/Map"), {
+  ssr: false,
+  loading: () => (
+    <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
+      <div className="h-[460px] w-full rounded-md border border-zinc-200 bg-zinc-100" />
+    </section>
+  )
+});
 
 type StageKey = "incident" | "ingest" | "reason" | "dispatch";
 type StageStatus = "idle" | "active" | "done" | "error";
@@ -349,7 +358,7 @@ export default function HomePage() {
 
       {incidentId && (
         <section className="mx-auto flex max-w-7xl flex-col gap-6 px-5 pb-10 sm:px-8">
-          <IncidentMap incidentId={incidentId} />
+          <Map incidentId={incidentId} />
           <ZoneList incidentId={incidentId} />
 
           {result && (

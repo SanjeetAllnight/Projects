@@ -1,11 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { collection, onSnapshot, type DocumentData } from "firebase/firestore";
-import mapboxgl, { type LngLatBoundsLike, type Marker } from "mapbox-gl";
+import L, { type DivIcon, type LatLngBoundsExpression } from "leaflet";
+import {
+  MapContainer,
+  Marker,
+  Popup,
+  TileLayer,
+  useMap
+} from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+import "leaflet-defaulticon-compatibility/dist/leaflet-defaulticon-compatibility.css";
+import "leaflet-defaulticon-compatibility";
 import { db } from "@/lib/firebase";
 
-type IncidentMapProps = {
+type MapProps = {
   incidentId: string;
 };
 
@@ -18,7 +28,7 @@ type ZoneMarker = {
   coordinates: [number, number];
 };
 
-const mapCenter: [number, number] = [77.5946, 12.9716];
+const defaultCenter: [number, number] = [20.5937, 78.9629];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -59,17 +69,17 @@ function normalizeAssignedResources(value: unknown): Record<string, number> {
           Number.isFinite(numberValue) ? Math.max(0, Math.floor(numberValue)) : 0
         ] as const;
       })
-      .filter(([, quantity]) => quantity > 0)
+      .filter(([resourceName, quantity]) => resourceName.trim() && quantity > 0)
   );
 }
 
 function coordinateForIndex(index: number): [number, number] {
-  const angle = index * 1.9;
-  const radius = 0.035 + index * 0.012;
+  const angle = index * 1.8;
+  const radius = 1.6 + index * 0.18;
 
   return [
-    Number((mapCenter[0] + Math.cos(angle) * radius).toFixed(6)),
-    Number((mapCenter[1] + Math.sin(angle) * radius).toFixed(6))
+    Number((defaultCenter[0] + Math.sin(angle) * radius).toFixed(6)),
+    Number((defaultCenter[1] + Math.cos(angle) * radius).toFixed(6))
   ];
 }
 
@@ -102,13 +112,24 @@ function severityColor(severity: string): string {
   }
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function createSeverityIcon(severity: string): DivIcon {
+  const color = severityColor(severity);
+
+  return L.divIcon({
+    className: "zone-severity-marker",
+    html: `<span style="
+      display: block;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: ${color};
+      border: 3px solid #ffffff;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.28);
+    "></span>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -12]
+  });
 }
 
 function formatResourceName(value: string): string {
@@ -123,49 +144,33 @@ function formatResources(resources: Record<string, number>): string {
   }
 
   return entries
-    .map(
-      ([resourceName, quantity]) =>
-        `${escapeHtml(formatResourceName(resourceName))}: ${quantity}`
-    )
+    .map(([resourceName, quantity]) => `${formatResourceName(resourceName)}: ${quantity}`)
     .join(", ");
 }
 
-function createMarkerElement(color: string): HTMLDivElement {
-  const marker = document.createElement("div");
-  marker.style.width = "18px";
-  marker.style.height = "18px";
-  marker.style.borderRadius = "999px";
-  marker.style.background = color;
-  marker.style.border = "3px solid #ffffff";
-  marker.style.boxShadow = "0 6px 18px rgba(15, 23, 42, 0.28)";
+function FitToZones({ zones }: { zones: ZoneMarker[] }) {
+  const map = useMap();
 
-  return marker;
+  useEffect(() => {
+    if (zones.length === 0) {
+      map.setView(defaultCenter, 5);
+      return;
+    }
+
+    const bounds = zones.map((zone) => zone.coordinates) as LatLngBoundsExpression;
+    map.fitBounds(bounds, {
+      padding: [44, 44],
+      maxZoom: 8
+    });
+  }, [map, zones]);
+
+  return null;
 }
 
-function popupHTML(zone: ZoneMarker): string {
-  return `
-    <div style="min-width: 190px;">
-      <p style="margin: 0 0 6px; font-weight: 700; color: #18181b;">
-        ${escapeHtml(zone.zone_name)}
-      </p>
-      <p style="margin: 0 0 4px; color: #3f3f46;">
-        Priority: ${zone.priority_score ?? "pending"}
-      </p>
-      <p style="margin: 0; color: #3f3f46;">
-        Resources: ${formatResources(zone.assigned_resources)}
-      </p>
-    </div>
-  `;
-}
-
-export function IncidentMap({ incidentId }: IncidentMapProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<mapboxgl.Map | null>(null);
-  const markersRef = useRef<Map<string, Marker>>(new Map());
+export default function Map({ incidentId }: MapProps) {
   const [zones, setZones] = useState<ZoneMarker[]>([]);
   const [isLoading, setIsLoading] = useState(Boolean(incidentId));
   const [error, setError] = useState("");
-  const accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
 
   useEffect(() => {
     if (!incidentId.trim()) {
@@ -201,73 +206,13 @@ export function IncidentMap({ incidentId }: IncidentMapProps) {
     return () => unsubscribe();
   }, [incidentId]);
 
-  useEffect(() => {
-    if (!containerRef.current || mapRef.current || !accessToken) {
-      return;
-    }
-
-    mapboxgl.accessToken = accessToken;
-
-    mapRef.current = new mapboxgl.Map({
-      container: containerRef.current,
-      style: "mapbox://styles/mapbox/streets-v12",
-      center: mapCenter,
-      zoom: 11
-    });
-
-    mapRef.current.addControl(new mapboxgl.NavigationControl(), "top-right");
-
-    return () => {
-      markersRef.current.forEach((marker) => marker.remove());
-      markersRef.current.clear();
-      mapRef.current?.remove();
-      mapRef.current = null;
-    };
-  }, [accessToken]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-
-    if (!map) {
-      return;
-    }
-
-    markersRef.current.forEach((marker) => marker.remove());
-    markersRef.current.clear();
-
-    zones.forEach((zone) => {
-      const marker = new mapboxgl.Marker({
-        element: createMarkerElement(severityColor(zone.severity))
-      })
-        .setLngLat(zone.coordinates)
-        .setPopup(new mapboxgl.Popup({ offset: 18 }).setHTML(popupHTML(zone)))
-        .addTo(map);
-
-      markersRef.current.set(zone.id, marker);
-    });
-
-    if (zones.length > 0) {
-      const bounds = new mapboxgl.LngLatBounds();
-      zones.forEach((zone) => bounds.extend(zone.coordinates));
-      map.fitBounds(bounds as LngLatBoundsLike, {
-        padding: 80,
-        maxZoom: 13,
-        duration: 600
-      });
-    }
-  }, [zones]);
-
   const statusText = useMemo(() => {
-    if (!accessToken) {
-      return "Mapbox token missing";
-    }
-
     if (isLoading) {
       return "Listening...";
     }
 
     return `${zones.length} markers`;
-  }, [accessToken, isLoading, zones.length]);
+  }, [isLoading, zones.length]);
 
   return (
     <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
@@ -289,16 +234,42 @@ export function IncidentMap({ incidentId }: IncidentMapProps) {
         </p>
       )}
 
-      {!accessToken && (
-        <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          Add NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN to enable the map.
-        </p>
-      )}
+      <div className="mt-4 h-[460px] w-full overflow-hidden rounded-md border border-zinc-200 bg-zinc-100">
+        <MapContainer
+          center={defaultCenter}
+          zoom={5}
+          scrollWheelZoom
+          className="h-full w-full"
+        >
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
+          <FitToZones zones={zones} />
 
-      <div
-        ref={containerRef}
-        className="mt-4 h-[420px] overflow-hidden rounded-md border border-zinc-200 bg-zinc-100"
-      />
+          {zones.map((zone) => (
+            <Marker
+              key={zone.id}
+              position={zone.coordinates}
+              icon={createSeverityIcon(zone.severity)}
+            >
+              <Popup>
+                <div className="min-w-48">
+                  <p className="m-0 text-sm font-semibold text-zinc-950">
+                    {zone.zone_name}
+                  </p>
+                  <p className="mb-0 mt-2 text-sm text-zinc-700">
+                    Priority: {zone.priority_score ?? "pending"}
+                  </p>
+                  <p className="mb-0 mt-1 text-sm text-zinc-700">
+                    Resources: {formatResources(zone.assigned_resources)}
+                  </p>
+                </div>
+              </Popup>
+            </Marker>
+          ))}
+        </MapContainer>
+      </div>
     </section>
   );
 }
