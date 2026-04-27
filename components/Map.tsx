@@ -8,6 +8,7 @@ import {
   Marker,
   Popup,
   TileLayer,
+  Tooltip,
   useMap
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
@@ -253,6 +254,14 @@ export default function Map({ incidentId }: MapProps) {
               position={zone.coordinates}
               icon={createSeverityIcon(zone.severity)}
             >
+              <Tooltip direction="top" offset={[0, -10]} opacity={1}>
+                <span className="font-semibold">{zone.zone_name}</span>
+                <br />
+                <span className="text-xs uppercase opacity-75">{zone.severity}</span>
+                {zone.priority_score && (
+                  <span className="ml-1 text-xs font-bold">({zone.priority_score})</span>
+                )}
+              </Tooltip>
               <Popup>
                 <div className="min-w-48">
                   <p className="m-0 text-sm font-semibold text-zinc-950">

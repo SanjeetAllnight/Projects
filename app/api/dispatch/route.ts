@@ -81,26 +81,38 @@ function normalizeDispatchedZones(
 }
 
 function buildDispatchPrompt(zones: ZoneDocument[]): string {
-  return `You are generating real-world disaster response briefs.
+  return `You are generating real-world disaster response briefs with advanced reasoning.
 
 Return ONLY valid JSON.
 
 Input:
 ${JSON.stringify(zones)}
 
-For each zone:
-- Describe situation clearly
-- Explain urgency
-- Mention assigned resources
-- Keep it concise but realistic
+For each zone, generate a "dispatch_brief" that includes:
+1. WHY resources were assigned (or why they were not).
+2. WHY some needs are unfulfilled (referencing global constraints if necessary).
+3. Mention competing zones if they impacted this zone's allocation.
+4. Urgency and situational clarity.
+
+EXAMPLE TRANSFORMATION:
+OLD: "High severity incident. Deploy 2 ambulances."
+NEW: "High severity incident with critical medical needs. Competing demand from Slum Settlement detected. Central Hospital prioritized due to life-threatening conditions. Two ambulances allocated; remaining extraction needs unfulfilled due to team scarcity."
+
+STRICT RULES:
+- No null/undefined fields
+- No missing keys
+- Always return valid JSON
+- Maintain professional but urgent tone
 
 Output:
-[
-  {
-    "zone_name": "string",
-    "dispatch_brief": "string"
-  }
-]`;
+{
+  "zones": [
+    {
+      "zone_name": "string",
+      "dispatch_brief": "string"
+    }
+  ]
+}`;
 }
 
 export async function POST(request: NextRequest) {

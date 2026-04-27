@@ -15,10 +15,20 @@ type ResourceInventory = Record<string, number>;
 type ReasonedZone = {
   zone_id: string;
   zone_name: string;
+  severity: "low" | "medium" | "high";
   priority_score: number;
+  needs: string[];
   assigned_resources: ResourceInventory;
   conflicts_detected: string[];
   conflict_resolution: string;
+  unfulfilled_needs: string[];
+  confidence: number;
+};
+
+type GlobalSummary = {
+  strategy: string;
+  resource_usage: Record<string, { total: number; allocated: number; remaining: number }>;
+  unfulfilled_zones_count: number;
 };
 
 type UpdatedZone = ReasonedZone & {
@@ -210,7 +220,9 @@ function normalizeReasonedZones(
       return {
         zone_id: zoneId,
         zone_name: normalizedZoneName,
+        severity: (zone.severity?.toString().toLowerCase() as any) || "medium",
         priority_score: normalizePriorityScore(zone.priority_score),
+        needs: normalizeStringArray(zone.needs),
         assigned_resources: normalizeAssignedResources(
           zone.assigned_resources,
           inventory
@@ -219,7 +231,9 @@ function normalizeReasonedZones(
         conflict_resolution:
           typeof zone.conflict_resolution === "string"
             ? zone.conflict_resolution.trim()
-            : ""
+            : "",
+        unfulfilled_needs: normalizeStringArray(zone.unfulfilled_needs),
+        confidence: typeof zone.confidence === "number" ? zone.confidence : 0.9
       };
     })
     .filter((zone): zone is ReasonedZone => zone !== null);
@@ -271,7 +285,8 @@ function enforceResourceLimits(
       conflict_resolution:
         conflictsDetected.length > 0 && !zone.conflict_resolution
           ? "Resources were assigned by priority score until inventory limits were reached."
-          : zone.conflict_resolution
+          : zone.conflict_resolution,
+      unfulfilled_needs: zone.unfulfilled_needs
     };
   });
 }
@@ -305,18 +320,59 @@ IMPORTANT:
 - You MUST explain trade-offs
 - Prioritize human life over infrastructure
 
+CRITICAL CONSTRAINTS:
+- Resources are LIMITED and MUST NOT be exceeded
+- Total allocated resources MUST be <= available resources
+- If resources are insufficient, some zones MUST receive NO resources
+
+CONFLICT DETECTION:
+- If multiple zones require the same limited resource:
+  - Populate "conflicts_detected"
+  - Explicitly mention competing zones (e.g., "Riverside vs Industrial competing for ambulance")
+
+TRADE-OFF REASONING:
+- You MUST explain decisions: "Zone A prioritized over Zone B because..."
+- Consider: severity, urgency, human life risk
+
+UNFULFILLED NEEDS:
+- Add field: "unfulfilled_needs": ["ambulance", "rescue_team", ...]
+- This MUST list resources that could not be allocated to this zone
+
+REALISM RULES:
+- DO NOT allocate resources to all zones if supply is insufficient
+- Some zones may receive ZERO resources
+- Prioritize human life over infrastructure
+
 Output:
 {
+  "global_summary": {
+    "strategy": "string",
+    "resource_usage": {
+      "resource_name": { "total": number, "allocated": number, "remaining": number }
+    },
+    "unfulfilled_zones_count": number
+  },
   "allocations": [
     {
       "zone_name": "string",
+      "severity": "low" | "medium" | "high",
       "priority_score": number,
-      "assigned_resources": ["string"],
+      "needs": ["string"],
+      "assigned_resources": {"resource_name": number},
       "conflicts_detected": ["string"],
-      "conflict_resolution": "string"
+      "conflict_resolution": "string",
+      "unfulfilled_needs": ["string"],
+      "confidence": number
     }
   ]
-}`;
+}
+
+STRICT RULES:
+- No null/undefined fields
+- No missing keys
+- Always return valid JSON
+- Maintain compatibility with frontend
+- If a zone has no assigned resources, unfulfilled_needs MUST be explicit.`;
 }
 
 export async function POST(request: NextRequest) {
@@ -363,18 +419,44 @@ export async function POST(request: NextRequest) {
     );
     const updatedZones = enforceResourceLimits(reasonedZones, resourceInventory);
 
+    // Soft validation: warn if AI over-allocated any resource
+    const totalAllocated: Record<string, number> = {};
+    for (const zone of updatedZones) {
+      for (const [resource, qty] of Object.entries(zone.assigned_resources)) {
+        totalAllocated[resource] = (totalAllocated[resource] ?? 0) + qty;
+      }
+    }
+    for (const [resource, total] of Object.entries(totalAllocated)) {
+      if (total > (resourceInventory[resource] ?? 0)) {
+        console.warn(`AI over-allocated resources: ${resource} (allocated ${total}, available ${resourceInventory[resource]})`);
+      }
+    }
+
     await Promise.all(
       updatedZones.map((zone) =>
         updateZone(incidentId, zone.zone_id, {
+          severity: zone.severity,
           priority_score: zone.priority_score,
+          needs: zone.needs,
           assigned_resources: zone.assigned_resources,
           conflicts_detected: zone.conflicts_detected,
-          conflict_resolution: zone.conflict_resolution
+          conflict_resolution: zone.conflict_resolution,
+          unfulfilled_needs: zone.unfulfilled_needs,
+          confidence: zone.confidence
         })
       )
     );
 
-    return NextResponse.json({ zones: updatedZones });
+    const globalSummary: GlobalSummary = (aiOutput as any).global_summary || {
+      strategy: "Resources prioritized by severity and priority score.",
+      resource_usage: {},
+      unfulfilled_zones_count: updatedZones.filter(z => Object.keys(z.assigned_resources).length === 0).length
+    };
+
+    return NextResponse.json({ 
+      zones: updatedZones,
+      global_summary: globalSummary
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to reason over zones.";

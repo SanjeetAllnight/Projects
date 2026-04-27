@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { FormEvent, useMemo, useState } from "react";
 import { createIncident } from "@/lib/firebase";
 import { ZoneList } from "@/components/ZoneList";
+import { ResourceSummary } from "@/components/ResourceSummary";
 
 const Map = dynamic(() => import("@/components/Map"), {
   ssr: false,
@@ -33,6 +34,11 @@ type DispatchZone = {
 type DispatchResponse = {
   incident_id: string;
   zones: DispatchZone[];
+  global_summary?: {
+    strategy: string;
+    resource_usage: Record<string, { total: number; allocated: number; remaining: number }>;
+    unfulfilled_zones_count: number;
+  };
 };
 
 const initialStages: Record<StageKey, StageStatus> = {
@@ -129,6 +135,7 @@ export default function HomePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [incidentId, setIncidentId] = useState("");
   const [result, setResult] = useState<DispatchResponse | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
   const [error, setError] = useState("");
 
   const resourceInventory = useMemo(
@@ -359,13 +366,25 @@ export default function HomePage() {
       {incidentId && (
         <section className="mx-auto flex max-w-7xl flex-col gap-6 px-5 pb-10 sm:px-8">
           <Map incidentId={incidentId} />
+          {result?.global_summary && (
+            <ResourceSummary summary={result.global_summary} />
+          )}
           <ZoneList incidentId={incidentId} />
 
-          {result && (
-            <pre className="mt-5 overflow-auto rounded-md border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 text-zinc-100">
-              {JSON.stringify(result, null, 2)}
-            </pre>
-          )}
+          <div className="mt-8">
+            <button
+              onClick={() => setShowDebug(!showDebug)}
+              className="text-xs font-medium text-zinc-500 transition hover:text-zinc-800 focus:outline-none"
+            >
+              {showDebug ? "Hide Debug Data" : "Show Debug Data"}
+            </button>
+
+            {showDebug && result && (
+              <pre className="mt-4 overflow-auto rounded-md border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 text-zinc-100">
+                {JSON.stringify(result, null, 2)}
+              </pre>
+            )}
+          </div>
         </section>
       )}
     </main>
