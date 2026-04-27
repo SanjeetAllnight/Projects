@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getIncident, getZones, updateZone } from "@/lib/firebase";
-import { generateJSON } from "@/lib/gemini";
+import { generateJSON } from "@/lib/ollama";
 
 type ReasonRequestBody = {
   incident_id?: unknown;
@@ -14,6 +14,7 @@ type ResourceInventory = Record<string, number>;
 
 type ReasonedZone = {
   zone_id: string;
+  zone_name: string;
   priority_score: number;
   assigned_resources: ResourceInventory;
   conflicts_detected: string[];
@@ -60,6 +61,16 @@ function getResourceInventory(incident: Record<string, unknown>): ResourceInvent
   );
 }
 
+function getZoneName(zone: ZoneDocument): string {
+  return typeof zone.zone_name === "string" && zone.zone_name.trim()
+    ? zone.zone_name.trim()
+    : zone.id;
+}
+
+function normalizeZoneName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function normalizePriorityScore(value: unknown): number {
   const score =
     typeof value === "number"
@@ -86,10 +97,61 @@ function normalizeStringArray(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function normalizeResourceKey(
+  value: string,
+  inventory: ResourceInventory
+): string | null {
+  const normalizedValue = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  return (
+    Object.keys(inventory).find((resourceName) => {
+      const normalizedResource = resourceName
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
+
+      return (
+        normalizedValue.includes(normalizedResource) ||
+        normalizedResource.includes(normalizedValue) ||
+        normalizedValue.includes(normalizedResource.replace(/s$/, "")) ||
+        normalizedResource.replace(/s$/, "").includes(normalizedValue)
+      );
+    }) ?? null
+  );
+}
+
+function quantityFromResourceLabel(value: string): number {
+  const match = value.match(/\d+/);
+
+  if (!match) {
+    return 1;
+  }
+
+  return Math.max(1, Math.floor(Number(match[0])));
+}
+
 function normalizeAssignedResources(
   value: unknown,
   inventory: ResourceInventory
 ): ResourceInventory {
+  if (Array.isArray(value)) {
+    return value.reduce<ResourceInventory>((resources, item) => {
+      if (typeof item !== "string") {
+        return resources;
+      }
+
+      const resourceName = normalizeResourceKey(item, inventory);
+
+      if (!resourceName) {
+        return resources;
+      }
+
+      resources[resourceName] =
+        (resources[resourceName] ?? 0) + quantityFromResourceLabel(item);
+
+      return resources;
+    }, {});
+  }
+
   if (!isRecord(value)) {
     return {};
   }
@@ -120,26 +182,34 @@ function normalizeAssignedResources(
 
 function normalizeReasonedZones(
   value: unknown,
-  zoneIds: Set<string>,
+  zoneIdByName: Map<string, string>,
   inventory: ResourceInventory
 ): ReasonedZone[] {
-  const candidate = isRecord(value) ? value.zones : value;
+  const candidate = isRecord(value) ? value.allocations ?? value.zones : value;
 
   if (!Array.isArray(candidate)) {
-    throw new Error("Gemini output must contain a zones array.");
+    throw new Error("Ollama output must contain an allocations array.");
   }
 
   const zones = candidate
     .filter(isRecord)
     .map((zone): ReasonedZone | null => {
-      const zoneId = zone.zone_id;
+      const zoneName = zone.zone_name;
 
-      if (typeof zoneId !== "string" || !zoneIds.has(zoneId)) {
+      if (typeof zoneName !== "string") {
+        return null;
+      }
+
+      const normalizedZoneName = zoneName.trim();
+      const zoneId = zoneIdByName.get(normalizeZoneName(normalizedZoneName));
+
+      if (!normalizedZoneName || !zoneId) {
         return null;
       }
 
       return {
         zone_id: zoneId,
+        zone_name: normalizedZoneName,
         priority_score: normalizePriorityScore(zone.priority_score),
         assigned_resources: normalizeAssignedResources(
           zone.assigned_resources,
@@ -155,7 +225,7 @@ function normalizeReasonedZones(
     .filter((zone): zone is ReasonedZone => zone !== null);
 
   if (zones.length === 0) {
-    throw new Error("Gemini output did not contain valid reasoned zones.");
+    throw new Error("Ollama output did not contain valid allocations.");
   }
 
   return zones;
@@ -210,40 +280,43 @@ function buildReasoningPrompt(
   zones: ZoneDocument[],
   resourceInventory: ResourceInventory
 ): string {
-  return `You are the Reasoning Agent for an AI Micro-Zone Disaster Intelligence & Resource Dispatcher.
+  return `You are an AI disaster resource allocation engine.
 
-Assign priorities, allocate limited resources, detect conflicts, and resolve conflicts logically.
+Return ONLY valid JSON.
 
-Required JSON schema:
+Input:
+Zones:
+${JSON.stringify(zones)}
+
+Resources:
+${JSON.stringify(resourceInventory)}
+
+Tasks:
+1. Assign priority_score (1-10)
+2. Allocate LIMITED resources (respect constraints strictly)
+3. Detect conflicts (same resource needed in multiple zones)
+4. Resolve conflicts using:
+   - severity
+   - urgency
+   - human risk
+
+IMPORTANT:
+- You MUST NOT assign more resources than available
+- You MUST explain trade-offs
+- Prioritize human life over infrastructure
+
+Output:
 {
-  "zones": [
+  "allocations": [
     {
-      "zone_id": "string",
-      "priority_score": 1,
-      "assigned_resources": {
-        "resource_name": 0
-      },
+      "zone_name": "string",
+      "priority_score": number,
+      "assigned_resources": ["string"],
       "conflicts_detected": ["string"],
       "conflict_resolution": "string"
     }
   ]
-}
-
-Rules:
-- Return exactly one JSON object matching the schema.
-- Include every input zone exactly once using its id as zone_id.
-- priority_score must be an integer from 1 to 10.
-- assigned_resources must only use resources present in resource_inventory.
-- Total assigned_resources across all zones must not exceed resource_inventory.
-- Give scarce resources to higher-priority zones first.
-- conflicts_detected must list resource shortages, contradictory needs, or severity-confidence issues.
-- conflict_resolution must explain the final allocation decision.
-
-resource_inventory:
-${JSON.stringify(resourceInventory)}
-
-zones:
-${JSON.stringify(zones)}`;
+}`;
 }
 
 export async function POST(request: NextRequest) {
@@ -277,13 +350,15 @@ export async function POST(request: NextRequest) {
     }
 
     const resourceInventory = getResourceInventory(incident);
-    const zoneIds = new Set(zones.map((zone) => zone.id));
+    const zoneIdByName = new Map(
+      zones.map((zone) => [normalizeZoneName(getZoneName(zone)), zone.id])
+    );
     const aiOutput = await generateJSON(
       buildReasoningPrompt(zones, resourceInventory)
     );
     const reasonedZones = normalizeReasonedZones(
       aiOutput,
-      zoneIds,
+      zoneIdByName,
       resourceInventory
     );
     const updatedZones = enforceResourceLimits(reasonedZones, resourceInventory);

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getZones, updateZone } from "@/lib/firebase";
-import { generateJSON } from "@/lib/gemini";
+import { generateJSON } from "@/lib/ollama";
 
 type DispatchRequestBody = {
   incident_id?: unknown;
@@ -12,6 +12,7 @@ type ZoneDocument = Record<string, unknown> & {
 
 type DispatchedZone = {
   zone_id: string;
+  zone_name: string;
   dispatch_brief: string;
 };
 
@@ -23,75 +24,83 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function getZoneName(zone: ZoneDocument): string {
+  return typeof zone.zone_name === "string" && zone.zone_name.trim()
+    ? zone.zone_name.trim()
+    : zone.id;
+}
+
+function normalizeZoneName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function normalizeDispatchedZones(
   value: unknown,
-  zoneIds: Set<string>
+  zoneIdByName: Map<string, string>
 ): DispatchedZone[] {
   const candidate = isRecord(value) ? value.zones : value;
 
   if (!Array.isArray(candidate)) {
-    throw new Error("Gemini output must contain a zones array.");
+    throw new Error("Ollama output must contain an array of dispatch briefs.");
   }
 
   const zones = candidate
     .filter(isRecord)
     .map((zone): DispatchedZone | null => {
-      const zoneId = zone.zone_id;
+      const zoneName = zone.zone_name;
       const dispatchBrief = zone.dispatch_brief;
 
       if (
-        typeof zoneId !== "string" ||
-        !zoneIds.has(zoneId) ||
+        typeof zoneName !== "string" ||
         typeof dispatchBrief !== "string"
       ) {
         return null;
       }
 
+      const normalizedZoneName = zoneName.trim();
+      const zoneId = zoneIdByName.get(normalizeZoneName(normalizedZoneName));
       const normalizedBrief = dispatchBrief.trim();
 
-      if (!normalizedBrief) {
+      if (!normalizedZoneName || !zoneId || !normalizedBrief) {
         return null;
       }
 
       return {
         zone_id: zoneId,
+        zone_name: normalizedZoneName,
         dispatch_brief: normalizedBrief
       };
     })
     .filter((zone): zone is DispatchedZone => zone !== null);
 
   if (zones.length === 0) {
-    throw new Error("Gemini output did not contain valid dispatch briefs.");
+    throw new Error("Ollama output did not contain valid dispatch briefs.");
   }
 
   return zones;
 }
 
 function buildDispatchPrompt(zones: ZoneDocument[]): string {
-  return `You are the Dispatch Agent for an AI Micro-Zone Disaster Intelligence & Resource Dispatcher.
+  return `You are generating real-world disaster response briefs.
 
-Generate concise, human-readable dispatch briefs for responders using the allocation data for each zone.
+Return ONLY valid JSON.
 
-Required JSON schema:
-{
-  "zones": [
-    {
-      "zone_id": "string",
-      "dispatch_brief": "string"
-    }
-  ]
-}
+Input:
+${JSON.stringify(zones)}
 
-Rules:
-- Return exactly one JSON object matching the schema.
-- Include every input zone exactly once using its id as zone_id.
-- Each dispatch_brief must mention the zone name, priority score, assigned resources, conflicts, and immediate action.
-- Do not invent resources that are not present in assigned_resources.
-- Do not include markdown.
-- Keep each brief operational and concise.
+For each zone:
+- Describe situation clearly
+- Explain urgency
+- Mention assigned resources
+- Keep it concise but realistic
 
-zones:
-${JSON.stringify(zones)}`;
+Output:
+[
+  {
+    "zone_name": "string",
+    "dispatch_brief": "string"
+  }
+]`;
 }
 
 export async function POST(request: NextRequest) {
@@ -115,9 +124,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const zoneIds = new Set(zones.map((zone) => zone.id));
+    const zoneIdByName = new Map(
+      zones.map((zone) => [normalizeZoneName(getZoneName(zone)), zone.id])
+    );
     const aiOutput = await generateJSON(buildDispatchPrompt(zones));
-    const dispatchedZones = normalizeDispatchedZones(aiOutput, zoneIds);
+    const dispatchedZones = normalizeDispatchedZones(aiOutput, zoneIdByName);
     const briefsByZoneId = new Map(
       dispatchedZones.map((zone) => [zone.zone_id, zone.dispatch_brief])
     );
